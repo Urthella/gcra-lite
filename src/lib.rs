@@ -15,7 +15,10 @@
 //! assert!(denied.retry_after.as_millis() <= 200);
 //! ```
 
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// How many requests are allowed: up to `burst` at once, refilling evenly over `period`.
@@ -151,6 +154,77 @@ impl RateLimiter {
     }
 }
 
+/// One limiter per key (user id, IP, API key), all sharing the same quota.
+#[derive(Debug)]
+pub struct KeyedRateLimiter<K> {
+    gcra: Gcra,
+    epoch: Instant,
+    // ponytail: one mutex over the map; shard it if lock contention shows up in profiles.
+    tats: Mutex<HashMap<K, u64>>,
+}
+
+impl<K: Hash + Eq + Clone> KeyedRateLimiter<K> {
+    pub fn new(quota: Quota) -> Self {
+        Self {
+            gcra: Gcra::new(quota),
+            epoch: Instant::now(),
+            tats: Mutex::default(),
+        }
+    }
+
+    pub fn check(&self, key: &K) -> Result<Allowed, Denied> {
+        self.check_n_at(key, 1, Instant::now())
+    }
+
+    pub fn check_n(&self, key: &K, n: u32) -> Result<Allowed, Denied> {
+        self.check_n_at(key, n, Instant::now())
+    }
+
+    pub fn check_n_at(&self, key: &K, n: u32, now: Instant) -> Result<Allowed, Denied> {
+        let now = nanos_since(self.epoch, now);
+        let mut tats = self.lock();
+        let tat = tats.get(key).copied().unwrap_or(0);
+        let (new_tat, allowed) = self.gcra.decide(tat, now, n)?;
+        if n > 0 {
+            match tats.get_mut(key) {
+                Some(t) => *t = new_tat,
+                None => {
+                    tats.insert(key.clone(), new_tat);
+                }
+            }
+        }
+        Ok(allowed)
+    }
+
+    /// Drops keys whose quota has fully refilled: they behave exactly like keys never seen.
+    /// Call it periodically (say, every minute) to keep memory bounded. Returns how many were dropped.
+    pub fn retain_recent(&self) -> usize {
+        self.retain_recent_at(Instant::now())
+    }
+
+    pub fn retain_recent_at(&self, now: Instant) -> usize {
+        let now = nanos_since(self.epoch, now);
+        let mut tats = self.lock();
+        let before = tats.len();
+        tats.retain(|_, tat| *tat > now);
+        before - tats.len()
+    }
+
+    /// Number of keys currently tracked.
+    pub fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<K, u64>> {
+        // The map only holds integers, so a panic elsewhere can't leave it half-updated.
+        self.tats.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 fn nanos_since(epoch: Instant, now: Instant) -> u64 {
     u64::try_from(now.saturating_duration_since(epoch).as_nanos()).unwrap_or(u64::MAX)
 }
@@ -266,5 +340,39 @@ mod tests {
     #[should_panic(expected = "burst must be at least 1")]
     fn zero_burst_is_rejected() {
         Quota::per_second(0);
+    }
+
+    #[test]
+    fn keys_have_independent_quotas() {
+        let lim = KeyedRateLimiter::new(Quota::per_second(5));
+        let t0 = Instant::now();
+        for _ in 0..5 {
+            lim.check_n_at(&"alice", 1, t0).unwrap();
+        }
+        assert!(lim.check_n_at(&"alice", 1, t0).is_err());
+        assert_eq!(lim.check_n_at(&"bob", 1, t0).unwrap().remaining, 4);
+    }
+
+    #[test]
+    fn retain_recent_drops_only_refilled_keys() {
+        let lim = KeyedRateLimiter::new(Quota::per_second(5));
+        let t0 = Instant::now();
+        lim.check_n_at(&"alice", 5, t0).unwrap(); // full again at t0 + 1s
+        lim.check_n_at(&"bob", 1, t0).unwrap(); // full again at t0 + 200ms
+        assert_eq!(lim.retain_recent_at(t0 + 500 * MS), 1);
+        assert_eq!(lim.len(), 1);
+        assert!(
+            lim.check_n_at(&"alice", 1, t0 + 500 * MS)
+                .is_ok_and(|a| a.remaining == 1)
+        );
+        assert_eq!(lim.retain_recent_at(t0 + Duration::from_secs(2)), 1);
+        assert!(lim.is_empty());
+    }
+
+    #[test]
+    fn peeking_an_unseen_key_does_not_track_it() {
+        let lim = KeyedRateLimiter::new(Quota::per_second(5));
+        assert_eq!(lim.check_n(&"carol", 0).unwrap().remaining, 5);
+        assert!(lim.is_empty());
     }
 }
