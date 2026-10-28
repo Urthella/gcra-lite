@@ -1,0 +1,12 @@
+[package]
+name = "gcra-lite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Tiny, dependency-free GCRA rate limiter: lock-free single limiter and keyed limiter"
+license = "MIT"
+repository = "https://github.com/Urthella/gcra-lite"
+keywords = ["rate-limit", "gcra", "throttle", "lock-free", "leaky-bucket"]
+categories = ["algorithms", "concurrency", "network-programming"]
+
+[dependencies]
