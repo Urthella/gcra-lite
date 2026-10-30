@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/Urthella/gcra-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/Urthella/gcra-lite/actions/workflows/ci.yml)
 
-A tiny, dependency-free rate limiter for Rust built on **GCRA** (the Generic Cell Rate Algorithm), the same algorithm behind Stripe's and Redis Cell's limiters.
+A tiny, dependency-free rate limiter for Rust built on **GCRA** (the Generic Cell Rate Algorithm), the algorithm behind [redis-cell](https://github.com/brandur/redis-cell).
 
 - **Lock-free**: one `AtomicU64` per limiter, every check is a single compare-and-swap
 - **No refill task**: GCRA stores one timestamp, not a token count, so time does the refilling
