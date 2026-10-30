@@ -8,6 +8,7 @@ A tiny, dependency-free rate limiter for Rust built on **GCRA** (the Generic Cel
 - **No refill task**: GCRA stores one timestamp, not a token count, so time does the refilling
 - **HTTP-ready answers**: `remaining` and `reset_after` on success, exact `retry_after` on denial
 - **Weighted requests**: `check_n(n)` takes several cells atomically, or none
+- **Per-key limits**: `KeyedRateLimiter` for per-user, per-IP or per-API-key quotas, with bounded memory
 - **Zero dependencies**, `std` only
 
 ## Use
@@ -21,6 +22,22 @@ match limiter.check() {
     Ok(ok) => println!("allowed, {} left", ok.remaining),
     Err(denied) => println!("slow down, retry in {:?}", denied.retry_after),
 }
+```
+
+### Per-key limits
+
+```rust
+use gcra_lite::{KeyedRateLimiter, Quota};
+
+let per_user = KeyedRateLimiter::new(Quota::per_minute(60));
+
+if let Err(denied) = per_user.check(&user_id) {
+    return too_many_requests(denied.retry_after); // 429 + Retry-After
+}
+
+// Every minute or so, drop users whose quota has fully refilled.
+// They behave exactly like users never seen, so nothing is lost.
+per_user.retain_recent();
 ```
 
 ## How GCRA works
